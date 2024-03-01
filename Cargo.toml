@@ -2,6 +2,11 @@
 name = "multipart-rs"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "A simple, zero-allocation, streaming, async multipart reader & writer for Rust"
+repository = "https://www.github.com/feliwir/multipart-rs"
+keywords = ["multipart", "http", "async", "streaming", "zero-allocation"]
+categories = ["web-programming", "async", "http"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
