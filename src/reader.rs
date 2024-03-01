@@ -1,9 +1,11 @@
 use std::{
+    pin::Pin,
     str,
     task::{Context, Poll},
 };
 
-use futures_core::Stream;
+use bytes::{Buf, Bytes, BytesMut};
+use futures_core::{stream::LocalBoxStream, Stream};
 use futures_util::StreamExt;
 
 use crate::{error::MultipartError, multipart_type::MultipartType};
@@ -28,37 +30,54 @@ pub struct MultipartItem {
     headers: Vec<(String, String)>,
 
     /// Data
-    data: Vec<u8>,
+    data: BytesMut,
 }
 
 pub struct MultipartReader<'a> {
-    /// Inner state
     pub boundary: String,
-    data: &'a [u8],
-    state: InnerState,
     pub multipart_type: MultipartType,
+    /// Inner state
+    state: InnerState,
+    stream: LocalBoxStream<'a, Result<Bytes, MultipartError>>,
+    buf: BytesMut,
     pending_item: Option<MultipartItem>,
 }
 
 impl<'a> MultipartReader<'a> {
-    pub fn from_data_with_boundary_and_type(
-        data: &'a [u8],
+    pub fn from_stream_with_boundary_and_type<S>(
+        stream: S,
         boundary: &str,
         multipart_type: MultipartType,
-    ) -> Result<MultipartReader<'a>, MultipartError> {
+    ) -> Result<MultipartReader<'a>, MultipartError>
+    where
+        S: Stream<Item = Result<Bytes, MultipartError>> + 'a,
+    {
         Ok(MultipartReader {
-            data: data,
+            stream: stream.boxed_local(),
             boundary: boundary.to_string(),
             multipart_type: multipart_type,
             state: InnerState::FirstBoundary,
             pending_item: None,
+            buf: BytesMut::new(),
         })
     }
 
-    pub fn from_data_with_headers(
-        data: &'a [u8],
-        headers: &Vec<(String, String)>,
+    pub fn from_data_with_boundary_and_type(
+        data: &[u8],
+        boundary: &str,
+        multipart_type: MultipartType,
     ) -> Result<MultipartReader<'a>, MultipartError> {
+        let stream = futures_util::stream::iter(vec![Ok(Bytes::copy_from_slice(data))]);
+        MultipartReader::from_stream_with_boundary_and_type(stream, boundary, multipart_type)
+    }
+
+    pub fn from_stream_with_headers<S>(
+        stream: S,
+        headers: &Vec<(String, String)>,
+    ) -> Result<MultipartReader<'a>, MultipartError>
+    where
+        S: Stream<Item = Result<Bytes, MultipartError>> + 'a,
+    {
         // Search for the content-type header
         let content_type = headers
             .iter()
@@ -88,12 +107,21 @@ impl<'a> MultipartReader<'a> {
             .map_err(|_| MultipartError::InvalidMultipartType)?;
 
         Ok(MultipartReader {
-            data: data,
+            stream: stream.boxed_local(),
             boundary: boundary.to_string(),
             multipart_type: multipart_type,
             state: InnerState::FirstBoundary,
             pending_item: None,
+            buf: BytesMut::new(),
         })
+    }
+
+    pub fn from_data_with_headers(
+        data: &[u8],
+        headers: &Vec<(String, String)>,
+    ) -> Result<MultipartReader<'a>, MultipartError> {
+        let stream = futures_util::stream::iter(vec![Ok(Bytes::copy_from_slice(data))]);
+        MultipartReader::from_stream_with_headers(stream, headers)
     }
 
     // TODO: make this RFC compliant
@@ -105,100 +133,115 @@ impl<'a> MultipartReader<'a> {
 impl<'a> Stream for MultipartReader<'a> {
     type Item = Result<MultipartItem, MultipartError>;
 
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let finder = memchr::memmem::Finder::new("\r\n");
 
-        while let Some(idx) = finder.find(this.data) {
-            println!("{}", String::from_utf8_lossy(&this.data[..idx]));
-            match this.state {
-                InnerState::FirstBoundary => {
-                    // Check if the last line was a boundary
-                    if this.is_boundary(&this.data[..idx]) {
-                        this.state = InnerState::Headers;
-                    };
-                }
-                InnerState::Boundary => {
-                    // Check if the last line was a boundary
-                    if this.is_boundary(&this.data[..idx]) {
-                        // If we have a pending item, return it
-                        if let Some(item) = this.pending_item.take() {
-                            // Skip to the next line
-                            this.data = &this.data[2 + idx..];
-                            // Next state are the headers
+        loop {
+            while let Some(idx) = finder.find(&this.buf) {
+                println!("{}", String::from_utf8_lossy(&this.buf[..idx]));
+                match this.state {
+                    InnerState::FirstBoundary => {
+                        // Check if the last line was a boundary
+                        if this.is_boundary(&this.buf[..idx]) {
                             this.state = InnerState::Headers;
-                            return std::task::Poll::Ready(Some(Ok(item)));
+                        };
+                    }
+                    InnerState::Boundary => {
+                        // Check if the last line was a boundary
+                        if this.is_boundary(&this.buf[..idx]) {
+                            // If we have a pending item, return it
+                            if let Some(item) = this.pending_item.take() {
+                                // Skip to the next line
+                                this.buf.advance(2 + idx);
+                                // Next state are the headers
+                                this.state = InnerState::Headers;
+                                return std::task::Poll::Ready(Some(Ok(item)));
+                            }
+
+                            this.state = InnerState::Headers;
+                            this.pending_item = Some(MultipartItem {
+                                headers: vec![],
+                                data: BytesMut::new(),
+                            });
+                        };
+
+                        // Add the data to the pending item
+                        this.pending_item
+                            .as_mut()
+                            .unwrap()
+                            .data
+                            .extend(&this.buf[..idx])
+                    }
+                    InnerState::Headers => {
+                        // Check if we have a pending item or we should create one
+                        if this.pending_item.is_none() {
+                            this.pending_item = Some(MultipartItem {
+                                headers: vec![],
+                                data: BytesMut::new(),
+                            });
                         }
 
-                        this.state = InnerState::Headers;
-                        this.pending_item = Some(MultipartItem {
-                            headers: vec![],
-                            data: vec![],
-                        });
-                    };
+                        // Read the header line and split it into key and value
+                        let header = match str::from_utf8(&this.buf[..idx]) {
+                            Ok(h) => h,
+                            Err(_) => {
+                                this.state = InnerState::Eof;
+                                return std::task::Poll::Ready(Some(Err(
+                                    MultipartError::InvalidItemHeader,
+                                )));
+                            }
+                        };
 
-                    // Add the data to the pending item
-                    this.pending_item
-                        .as_mut()
-                        .unwrap()
-                        .data
-                        .extend_from_slice(&this.data[..idx]);
-                }
-                InnerState::Headers => {
-                    // Check if we have a pending item or we should create one
-                    if this.pending_item.is_none() {
-                        this.pending_item = Some(MultipartItem {
-                            headers: vec![],
-                            data: vec![],
-                        });
-                    }
+                        // This is no header anymore, we are at the end of the headers
+                        if header.trim().is_empty() {
+                            this.buf.advance(2 + idx);
+                            this.state = InnerState::Boundary;
+                            continue;
+                        }
 
-                    // Read the header line and split it into key and value
-                    let header = match str::from_utf8(&this.data[..idx]) {
-                        Ok(h) => h,
-                        Err(_) => {
+                        let header_parts: Vec<&str> = header.split(": ").collect();
+                        if header_parts.len() != 2 {
                             this.state = InnerState::Eof;
                             return std::task::Poll::Ready(Some(Err(
                                 MultipartError::InvalidItemHeader,
                             )));
                         }
-                    };
 
-                    // This is no header anymore, we are at the end of the headers
-                    if header.trim().is_empty() {
-                        this.data = &this.data[2 + idx..];
-                        this.state = InnerState::Boundary;
-                        continue;
+                        // Add header entry to the pending item
+                        this.pending_item
+                            .as_mut()
+                            .unwrap()
+                            .headers
+                            .push((header_parts[0].to_string(), header_parts[1].to_string()));
                     }
-
-                    let header_parts: Vec<&str> = header.split(": ").collect();
-                    if header_parts.len() != 2 {
-                        this.state = InnerState::Eof;
-                        return std::task::Poll::Ready(Some(Err(
-                            MultipartError::InvalidItemHeader,
-                        )));
+                    InnerState::Eof => {
+                        return std::task::Poll::Ready(None);
                     }
+                }
 
-                    // Add header entry to the pending item
-                    this.pending_item
-                        .as_mut()
-                        .unwrap()
-                        .headers
-                        .push((header_parts[0].to_string(), header_parts[1].to_string()));
-                }
-                InnerState::Eof => {
-                    return std::task::Poll::Ready(None);
-                }
+                // Skip to the next line
+                this.buf.advance(2 + idx);
             }
 
-            // Skip to the next line
-            this.data = &this.data[2 + idx..];
+            // Read more data from the stream
+            match Pin::new(&mut this.stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(data))) => {
+                    this.buf.extend_from_slice(&data);
+                }
+                Poll::Ready(None) => {
+                    this.state = InnerState::Eof;
+                    return std::task::Poll::Ready(None);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    this.state = InnerState::Eof;
+                    return std::task::Poll::Ready(Some(Err(e)));
+                }
+                Poll::Pending => {
+                    return std::task::Poll::Pending;
+                }
+            };
         }
-
-        std::task::Poll::Ready(None)
     }
 }
 
