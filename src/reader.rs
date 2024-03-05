@@ -33,24 +33,24 @@ pub struct MultipartItem {
     data: BytesMut,
 }
 
-pub struct MultipartReader<'a> {
+pub struct MultipartReader<'a, E> {
     pub boundary: String,
     pub multipart_type: MultipartType,
     /// Inner state
     state: InnerState,
-    stream: LocalBoxStream<'a, Result<Bytes, MultipartError>>,
+    stream: LocalBoxStream<'a, Result<Bytes, E>>,
     buf: BytesMut,
     pending_item: Option<MultipartItem>,
 }
 
-impl<'a> MultipartReader<'a> {
+impl<'a, E> MultipartReader<'a, E> {
     pub fn from_stream_with_boundary_and_type<S>(
         stream: S,
         boundary: &str,
         multipart_type: MultipartType,
-    ) -> Result<MultipartReader<'a>, MultipartError>
+    ) -> Result<MultipartReader<'a, E>, MultipartError>
     where
-        S: Stream<Item = Result<Bytes, MultipartError>> + 'a,
+        S: Stream<Item = Result<Bytes, E>> + 'a,
     {
         Ok(MultipartReader {
             stream: stream.boxed_local(),
@@ -66,7 +66,10 @@ impl<'a> MultipartReader<'a> {
         data: &[u8],
         boundary: &str,
         multipart_type: MultipartType,
-    ) -> Result<MultipartReader<'a>, MultipartError> {
+    ) -> Result<MultipartReader<'a, E>, MultipartError>
+    where
+        E: std::error::Error + 'a,
+    {
         let stream = futures_util::stream::iter(vec![Ok(Bytes::copy_from_slice(data))]);
         MultipartReader::from_stream_with_boundary_and_type(stream, boundary, multipart_type)
     }
@@ -74,9 +77,10 @@ impl<'a> MultipartReader<'a> {
     pub fn from_stream_with_headers<S>(
         stream: S,
         headers: &Vec<(String, String)>,
-    ) -> Result<MultipartReader<'a>, MultipartError>
+    ) -> Result<MultipartReader<'a, E>, MultipartError>
     where
-        S: Stream<Item = Result<Bytes, MultipartError>> + 'a,
+        S: Stream<Item = Result<Bytes, E>> + 'a,
+        E: std::error::Error,
     {
         // Search for the content-type header
         let content_type = headers
@@ -119,7 +123,10 @@ impl<'a> MultipartReader<'a> {
     pub fn from_data_with_headers(
         data: &[u8],
         headers: &Vec<(String, String)>,
-    ) -> Result<MultipartReader<'a>, MultipartError> {
+    ) -> Result<MultipartReader<'a, E>, MultipartError>
+    where
+        E: std::error::Error + 'a,
+    {
         let stream = futures_util::stream::iter(vec![Ok(Bytes::copy_from_slice(data))]);
         MultipartReader::from_stream_with_headers(stream, headers)
     }
@@ -130,7 +137,7 @@ impl<'a> MultipartReader<'a> {
     }
 }
 
-impl<'a> Stream for MultipartReader<'a> {
+impl<'a, E> Stream for MultipartReader<'a, E> {
     type Item = Result<MultipartItem, MultipartError>;
 
     fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -233,9 +240,9 @@ impl<'a> Stream for MultipartReader<'a> {
                     this.state = InnerState::Eof;
                     return std::task::Poll::Ready(None);
                 }
-                Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(_e))) => {
                     this.state = InnerState::Eof;
-                    return std::task::Poll::Ready(Some(Err(e)));
+                    return std::task::Poll::Ready(Some(Err(MultipartError::PollingDataFailed)));
                 }
                 Poll::Pending => {
                     return std::task::Poll::Pending;

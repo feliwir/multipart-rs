@@ -14,4 +14,7 @@ pub enum MultipartError {
 
     // Invalid Item header
     InvalidItemHeader,
+
+    // Failed to poll data from the stream
+    PollingDataFailed,
 }
