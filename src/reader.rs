@@ -280,16 +280,21 @@ Content-Type: text/html\r
 \r
 --974767299852498929531610575--\r\n";
 
-        assert!(MultipartReader::from_data_with_headers(data, &headermap).is_ok());
-        assert!(MultipartReader::from_data_with_boundary_and_type(
-            data,
-            "--974767299852498929531610575",
-            MultipartType::FormData
-        )
-        .is_ok());
+        assert!(
+            MultipartReader::<std::io::Error>::from_data_with_headers(data, &headermap).is_ok()
+        );
+        assert!(
+            MultipartReader::<std::io::Error>::from_data_with_boundary_and_type(
+                data,
+                "--974767299852498929531610575",
+                MultipartType::FormData
+            )
+            .is_ok()
+        );
 
         // Poll all the items from the reader
-        let mut reader = MultipartReader::from_data_with_headers(data, &headermap).unwrap();
+        let mut reader =
+            MultipartReader::<std::io::Error>::from_data_with_headers(data, &headermap).unwrap();
         assert_eq!(reader.multipart_type, MultipartType::FormData);
         let mut items = vec![];
 
