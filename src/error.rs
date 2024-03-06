@@ -1,4 +1,8 @@
-use std::fmt::{Display, Formatter, Result};
+use std::{
+    error::Error,
+    fmt::{Display, Formatter, Result},
+    ops::Mul,
+};
 
 #[derive(Debug)]
 pub enum MultipartError {
@@ -31,5 +35,11 @@ impl Display for MultipartError {
             MultipartError::InvalidItemHeader => write!(f, "Invalid Item header"),
             MultipartError::PollingDataFailed => write!(f, "Failed to poll data from the stream"),
         }
+    }
+}
+
+impl Error for MultipartError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
     }
 }
