@@ -110,12 +110,9 @@ impl<'a, E> MultipartReader<'a, E> {
             .parse::<MultipartType>()
             .map_err(|_| MultipartError::InvalidMultipartType)?;
 
-        let mut concat_boundary = String::from("--");
-        concat_boundary.push_str(&boundary.to_string());
-
         Ok(MultipartReader {
             stream: stream.boxed_local(),
-            boundary: concat_boundary,
+            boundary: boundary.to_string(),
             multipart_type: multipart_type,
             state: InnerState::FirstBoundary,
             pending_item: None,
@@ -134,9 +131,15 @@ impl<'a, E> MultipartReader<'a, E> {
         MultipartReader::from_stream_with_headers(stream, headers)
     }
 
+    fn is_final_boundary(self: &Self, data: &[u8]) -> bool {
+        let boundary = format!("--{}--", self.boundary);
+        data.starts_with(boundary.as_bytes())
+    }
+
     // TODO: make this RFC compliant
     fn is_boundary(self: &Self, data: &[u8]) -> bool {
-        data.starts_with(self.boundary.as_bytes())
+        let boundary = format!("--{}", self.boundary);
+        data.starts_with(boundary.as_bytes())
     }
 }
 
@@ -159,14 +162,19 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
                     InnerState::Boundary => {
                         // Check if the last line was a boundary
                         if this.is_boundary(&this.buf[..idx]) {
+                            let final_boundary = this.is_final_boundary(&this.buf[..idx]);
+
                             // If we have a pending item, return it
                             if let Some(mut item) = this.pending_item.take() {
                                 // Remove last 2 bytes from the data (which were a newline sequence)
                                 item.data.truncate(item.data.len() - 2);
                                 // Skip to the next line
                                 this.buf.advance(2 + idx);
-                                // Next state are the headers
-                                this.state = InnerState::Headers;
+                                if final_boundary {
+                                    this.state = InnerState::Eof;
+                                } else {
+                                    this.state = InnerState::Headers;
+                                }
                                 return std::task::Poll::Ready(Some(Ok(item)));
                             }
 
