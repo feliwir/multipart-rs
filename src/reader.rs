@@ -180,7 +180,7 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
                             .as_mut()
                             .unwrap()
                             .data
-                            .extend(&this.buf[..idx])
+                            .extend(&this.buf[..idx + 2])
                     }
                     InnerState::Headers => {
                         // Check if we have a pending item or we should create one
