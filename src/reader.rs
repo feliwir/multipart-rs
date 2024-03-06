@@ -110,9 +110,12 @@ impl<'a, E> MultipartReader<'a, E> {
             .parse::<MultipartType>()
             .map_err(|_| MultipartError::InvalidMultipartType)?;
 
+        let mut concat_boundary = String::from("--");
+        concat_boundary.push_str(&boundary.to_string());
+
         Ok(MultipartReader {
             stream: stream.boxed_local(),
-            boundary: boundary.to_string(),
+            boundary: concat_boundary,
             multipart_type: multipart_type,
             state: InnerState::FirstBoundary,
             pending_item: None,
@@ -146,7 +149,6 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
 
         loop {
             while let Some(idx) = finder.find(&this.buf) {
-                println!("{}", String::from_utf8_lossy(&this.buf[..idx]));
                 match this.state {
                     InnerState::FirstBoundary => {
                         // Check if the last line was a boundary
@@ -260,7 +262,7 @@ mod tests {
     async fn valid_request() {
         let headermap = vec![(
             "Content-Type".to_string(),
-            "multipart/form-data; boundary=--974767299852498929531610575".to_string(),
+            "multipart/form-data; boundary=974767299852498929531610575".to_string(),
         )];
         // Lines must end with CRLF
         let data = b"--974767299852498929531610575\r
@@ -286,7 +288,7 @@ Content-Type: text/html\r
         assert!(
             MultipartReader::<std::io::Error>::from_data_with_boundary_and_type(
                 data,
-                "--974767299852498929531610575",
+                "974767299852498929531610575",
                 MultipartType::FormData
             )
             .is_ok()
