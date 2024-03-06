@@ -27,10 +27,10 @@ enum InnerState {
 
 pub struct MultipartItem {
     /// Headers
-    headers: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
 
     /// Data
-    data: BytesMut,
+    pub data: BytesMut,
 }
 
 pub struct MultipartReader<'a, E> {
