@@ -160,7 +160,9 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
                         // Check if the last line was a boundary
                         if this.is_boundary(&this.buf[..idx]) {
                             // If we have a pending item, return it
-                            if let Some(item) = this.pending_item.take() {
+                            if let Some(mut item) = this.pending_item.take() {
+                                // Remove last 2 bytes from the data (which were a newline sequence)
+                                item.data.truncate(item.data.len() - 2);
                                 // Skip to the next line
                                 this.buf.advance(2 + idx);
                                 // Next state are the headers
