@@ -7,6 +7,12 @@ pub struct MultipartWriter {
     first: bool,
 }
 
+impl Default for MultipartWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultipartWriter {
     pub fn new() -> MultipartWriter {
         MultipartWriter {

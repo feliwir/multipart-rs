@@ -35,7 +35,7 @@ pub struct MultipartItem {
 }
 
 impl MultipartItem {
-    pub fn get_mime_type(&self) -> Result<MediaType, MultipartError> {
+    pub fn get_mime_type(&self) -> Result<MediaType<'_>, MultipartError> {
         let content_type = self
             .headers
             .iter()
