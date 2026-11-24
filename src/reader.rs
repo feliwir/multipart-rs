@@ -76,6 +76,10 @@ pub struct MultipartReader<'a, E> {
     stream: BoxStream<'a, Result<Bytes, E>>,
     buf: BytesMut,
     pending_item: Option<MultipartItem>,
+    /// Number of bytes at the start of `buf` already searched without finding a CRLF.
+    /// The next search starts there, so each byte is scanned only once instead of on
+    /// every chunk that arrives while a long line (e.g. binary part data) is buffered.
+    searched: usize,
 }
 
 impl<'a, E> MultipartReader<'a, E> {
@@ -94,6 +98,7 @@ impl<'a, E> MultipartReader<'a, E> {
             state: InnerState::FirstBoundary,
             pending_item: None,
             buf: BytesMut::new(),
+            searched: 0,
         })
     }
 
@@ -149,6 +154,7 @@ impl<'a, E> MultipartReader<'a, E> {
             state: InnerState::FirstBoundary,
             pending_item: None,
             buf: BytesMut::new(),
+            searched: 0,
         })
     }
 
@@ -183,7 +189,13 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
         let finder = memchr::memmem::Finder::new("\r\n");
 
         loop {
-            while let Some(idx) = finder.find(&this.buf) {
+            while let Some(idx) = finder
+                .find(&this.buf[this.searched..])
+                .map(|idx| idx + this.searched)
+            {
+                // Every branch below consumes the buffer up to and including this CRLF
+                this.searched = 0;
+
                 match this.state {
                     InnerState::FirstBoundary => {
                         // Check if the last line was a boundary
@@ -274,6 +286,10 @@ impl<'a, E> Stream for MultipartReader<'a, E> {
                 // Skip to the next line
                 this.buf.advance(2 + idx);
             }
+
+            // No CRLF in the buffer: only the new data has to be searched next time. The last
+            // byte is kept in the search, as it may be the '\r' of a CRLF split across chunks.
+            this.searched = this.buf.len().saturating_sub(1);
 
             // Read more data from the stream
             match Pin::new(&mut this.stream).poll_next(cx) {
@@ -401,5 +417,71 @@ Content-Type: text/html\r
         }
 
         assert_eq!(items.len(), 3);
+    }
+
+    /// Reads all items of `data`, fed to the reader in chunks of `chunk_size` bytes.
+    async fn read_chunked(data: &[u8], chunk_size: usize) -> Vec<MultipartItem> {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = data
+            .chunks(chunk_size)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let reader = MultipartReader::from_stream_with_boundary_and_type(
+            futures_util::stream::iter(chunks),
+            "boundary",
+            MultipartType::Related,
+        )
+        .unwrap();
+        reader
+            .map(|item| item.expect("valid multipart item"))
+            .collect()
+            .await
+    }
+
+    fn related_body(parts: &[&[u8]]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                data.extend_from_slice(b"\r\n");
+            }
+            data.extend_from_slice(b"--boundary\r\nContent-Type: application/dicom\r\n\r\n");
+            data.extend_from_slice(part);
+        }
+        data.extend_from_slice(b"\r\n--boundary--\r\n");
+        data
+    }
+
+    #[futures_test::test]
+    async fn crlf_split_across_chunks() {
+        // Part data with CRLFs at various offsets, including a trailing '\r'
+        let first: &[u8] = b"ab\r\ncd\r\n\r\nefgh\r";
+        let second: &[u8] = b"\r\nxyz";
+        let data = related_body(&[first, second]);
+
+        // Every chunk size splits the CRLFs (in data and framing) at different places
+        for chunk_size in 1..=data.len() {
+            let items = read_chunked(&data, chunk_size).await;
+            assert_eq!(items.len(), 2, "chunk size {chunk_size}");
+            assert_eq!(&items[0].data[..], first, "chunk size {chunk_size}");
+            assert_eq!(&items[1].data[..], second, "chunk size {chunk_size}");
+            assert_eq!(
+                items[0].headers,
+                vec![("Content-Type".to_string(), "application/dicom".to_string())]
+            );
+        }
+    }
+
+    #[futures_test::test]
+    async fn large_part_without_crlf_in_small_chunks() {
+        // A large binary part without line breaks (e.g. pixel data), followed by a small
+        // one. Searching the whole buffer on every chunk made this quadratic in the size.
+        let large = vec![0u8; 8 * 1024 * 1024];
+        let small: &[u8] = b"small\r\npart";
+        let data = related_body(&[&large, small]);
+
+        let items = read_chunked(&data, 4096).await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].data.len(), large.len());
+        assert!(items[0].data.iter().all(|&b| b == 0));
+        assert_eq!(&items[1].data[..], small);
     }
 }
